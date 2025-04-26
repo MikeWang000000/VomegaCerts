@@ -1,0 +1,36 @@
+name: production
+run-name: production
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: 0 6 * * 0
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  Renew-Certificate-Production:
+    uses: ./.github/workflows/cert-common.yml
+    with:
+      production: true
+    secrets: inherit
+
+  Release:
+    runs-on: ubuntu-latest
+    needs: Renew-Certificate-Production
+    steps:
+      - name: Check Out Repository Code
+        uses: actions/checkout@v4
+
+      - name: Create a Release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          date_str=$(date '+%Y%m%d')
+          git config user.name 'GitHub Actions'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git pull
+          git tag -a "$date_str" -m "$date_str"
+          git push origin "$date_str"
+          gh release create --title "$date_str" --notes '' --verify-tag "$date_str" crt/*.pem.aes

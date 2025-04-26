@@ -1,0 +1,159 @@
+name: cert-common
+run-name: cert-common
+on:
+  workflow_call:
+    inputs:
+      production:
+        required: true
+        type: boolean
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  Renew-Certificate:
+    name: Renew Certificate for vomega.net
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Out Repository Code
+        uses: actions/checkout@v4
+
+      - name: Install Required Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-certbot-dns-cloudflare
+
+      - name: Set Up Working Directory
+        env:
+          API_TOKEN: ${{ secrets.api_token }}
+          CERT_PASS: ${{ secrets.cert_pass }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          umask 077
+          mkdir -p -m 700 work/{api,csr,crt,cache,certbot/{config,var,logs}}
+
+          awk 'BEGIN{print "dns_cloudflare_api_token=" ENVIRON["API_TOKEN"]}' \
+              > 'work/api/cloudflare.ini'
+
+          openssl enc -d -base64 -aes-256-ctr -pbkdf2 -pass 'env:CERT_PASS' \
+              -in 'csr/vomega.net.csr.aes' \
+              -out 'work/csr/vomega.net.csr'
+
+      - name: Retrieve Latest Cache Key
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ${{ github.workspace }}/work
+        run: |
+          gh cache list --sort created_at --order desc \
+              --json 'key' \
+              --jq '"cache_key=" + .[0]["key"]' >> "$GITHUB_ENV"
+
+      - name: Restore Cache
+        if: ${{ env.cache_key }}
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ env.cache_key }}
+          path: ${{ github.workspace }}/work/cache
+
+      - name: Extract Cache Files
+        if: ${{ env.cache_key }}
+        env:
+          CACHE_PASS: ${{ secrets.cache_pass }}
+        working-directory: ${{ github.workspace }}/work
+        run: |
+          if [ -f "cache/cache.bin" ]; then
+              openssl enc -d -aes-256-ctr -pbkdf2 -pass 'env:CACHE_PASS' \
+                  -in 'cache/cache.bin' | tar -xf -
+          fi
+
+      - name: Renew SSL Certificate
+        working-directory: ${{ github.workspace }}/work
+        run: |
+          certbot certonly \
+              ${{ inputs.production && ' ' || '--staging' }} \
+              --non-interactive \
+              --agree-tos \
+              --register-unsafely-without-email \
+              --config-dir='certbot/config' \
+              --work-dir='certbot/var' \
+              --logs-dir='certbot/logs' \
+              --csr='csr/vomega.net.csr' \
+              --cert-path='crt/vomega.net.pem' \
+              --chain-path='crt/vomega.net.chain.pem' \
+              --fullchain-path='crt/vomega.net.fullchain.pem' \
+              --dns-cloudflare \
+              --dns-cloudflare-credentials='api/cloudflare.ini'
+
+      - name: Encrypt SSL Certificates
+        env:
+          CERT_PASS: ${{ secrets.cert_pass }}
+          CERT_DIR: "${{ github.workspace }}/\
+                     ${{ inputs.production && 'crt' || 'crt_staging' }}"
+        working-directory: ${{ github.workspace }}/work
+        run: |
+          mkdir -p "$CERT_DIR"
+          for cert in 'vomega.net.pem' \
+                      'vomega.net.chain.pem' \
+                      'vomega.net.fullchain.pem'; do
+              openssl enc -base64 -aes-256-ctr -pbkdf2 -pass 'env:CERT_PASS' \
+                  -in "crt/$cert" \
+                  -out "$CERT_DIR/$cert.aes"
+          done
+
+      - name: Create Cache Archive
+        env:
+          CACHE_PASS: ${{ secrets.cache_pass }}
+        working-directory: ${{ github.workspace }}/work
+        run: |
+          tar -cf - certbot/config/accounts | \
+              openssl enc -aes-256-ctr -pbkdf2 -pass 'env:CACHE_PASS' \
+              > cache/cache.bin
+          echo "new_cache_key=$(uuidgen)" >> "$GITHUB_ENV"
+
+      - name: Save Cache to GitHub
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ env.new_cache_key }}
+          path: ${{ github.workspace }}/work/cache
+
+      - name: Clean Up Working Directory
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          rm -rf work
+
+      - name: Create Issue on Failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ inputs.production && 'Production' || 'Staging' }}
+        run: |
+          message="$NAME workflow is failing"
+          owner="$(gh repo view --json 'owner' --jq '.owner.login')"
+          len=$(gh issue list --json 'id' --jq length --state 'open' \
+                --search "$message")
+          if [ "$len" = '0' ]; then
+              gh issue create --assignee "${owner}" \
+                  --title "$message" \
+                  --body "$message"
+          fi
+
+      - name: Commit and Push Updated Certificates
+        working-directory: ${{ github.workspace }}
+        env:
+          GIT_MESSAGE: >-
+            ${{ inputs.production
+                && 'auto-renewal' || 'auto-renewal (staging)' }}
+        run: |
+          git config user.name 'GitHub Actions'
+          git config user.email \
+              '41898282+github-actions[bot]@users.noreply.github.com'
+          git pull
+          git add crt*/
+          git commit -m "$GIT_MESSAGE"
+          git push

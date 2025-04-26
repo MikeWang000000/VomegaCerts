@@ -1,0 +1,17 @@
+name: staging
+run-name: staging
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: 0 6 * * *
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  Renew-Certificate-Staging:
+    uses: ./.github/workflows/cert-common.yml
+    with:
+      production: false
+    secrets: inherit
