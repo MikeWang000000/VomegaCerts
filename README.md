@@ -5,6 +5,7 @@
 ## Get Latest SSL Certificate for vomega.net
 
 ```bash
+#!/bin/bash
 export CERT_PASS=******
 
 curl 'https://certs.vomega.net/crt/vomega.net.fullchain.pem.aes' | openssl enc -d -base64 -aes-256-ctr -pbkdf2 -pass 'env:CERT_PASS' -out vomega.net.crt
